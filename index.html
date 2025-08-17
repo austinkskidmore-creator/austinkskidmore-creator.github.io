@@ -6,6 +6,8 @@
     <title>Mr. Juice: Astro-Splat! (Asteroids Style)</title>
     <!-- Tailwind CSS for UI styling -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tone.js for Web Audio API -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
     <style>
         body {
@@ -70,7 +72,6 @@
 
         .stat-item.mess-meter-wrapper {
             flex-grow: 1; /* Allow mess meter to take remaining space */
-            /* margin: 0 0.5rem; */ /* Removed margin, using gap in flex container */
         }
 
         .stat-label {
@@ -90,9 +91,9 @@
 
         .mess-meter-bar {
             width: 100%; /* Full width of its container */
-            height: 14px; /* Slightly taller for better visibility (was 12px) */
+            height: 14px; /* Slightly taller for better visibility */
             background-color: #333;
-            border-radius: 7px; /* Match new height for perfect half-circle ends */
+            border-radius: 7px;
             overflow: hidden;
             margin-top: 0.25rem;
             position: relative;
@@ -102,8 +103,7 @@
 
         .mess-meter-fill {
             height: 100%;
-            background-color: #ff4d4d; /* Red for mess */
-            width: 0%; /* Starts empty, fills up */
+            width: 100%; /* Starts full (100% health) */
             border-radius: 6px;
             transition: width 0.1s ease-out;
             box-shadow: inset 0 0 5px rgba(255,0,0,0.5);
@@ -121,7 +121,7 @@
             animation: mess-warning-pulse 0.8s infinite alternate;
         }
 
-        .juice-bolt-button {
+        .juice-bolt-button, .sound-toggle-button {
             background-color: #8a2be2; /* Blue-violet */
             color: white;
             padding: 0.5rem 0.75rem; /* Smaller padding for UI panel */
@@ -136,7 +136,7 @@
             flex-shrink: 0; /* Prevent shrinking */
         }
 
-        .juice-bolt-button:hover:not(:disabled) {
+        .juice-bolt-button:hover:not(:disabled), .sound-toggle-button:hover {
             background-color: #9933ff; /* Lighter violet on hover */
             transform: translateY(-1px);
             box-shadow: 0 3px 5px rgba(0, 0, 0, 0.4);
@@ -156,7 +156,6 @@
         @keyframes pulse {
             0%, 100% { transform: scale(1); opacity: 1; }
             50% { transform: scale(1.05); opacity: 0.8; }
-            100% { transform: scale(1); opacity: 1; } /* Ensure it returns to original state */
         }
 
         .game-over-overlay {
@@ -239,7 +238,11 @@
             <button id="juiceBoltButton" class="juice-bolt-button" disabled>
                 Juice Bolt! (0)
             </button>
-            <!-- Removed Lives Stat and Sound Toggle Button -->
+            
+            <!-- Sound Toggle Button -->
+            <button id="soundToggleButton" class="sound-toggle-button">
+                Sound: On
+            </button>
         </div>
 
         <canvas id="gameCanvas"></canvas>
@@ -260,6 +263,7 @@
         // UI elements
         const scoreValueElem = document.getElementById('scoreValue');
         const juiceBoltButton = document.getElementById('juiceBoltButton');
+        const soundToggleButton = document.getElementById('soundToggleButton'); // New sound toggle button
         const messMeterFillElem = document.getElementById('messMeterFill'); // Mess meter element
         const gameOverOverlay = document.getElementById('gameOverOverlay');
         const finalScoreElem = document.getElementById('finalScore');
@@ -276,13 +280,14 @@
         let messMeter = 0; // Mess Meter value (0-MAX_MESS). Now represents health.
         const MAX_MESS = 100;
         const MESS_WARNING_THRESHOLD = 30; // Warning starts when mess is LOW (30% remaining)
-        const MESS_PASSIVE_DECREASE_RATE = 0.1; // Mess decreases by 0.1 per second (was 0.15)
-        const MESS_MISSED_ASTEROID_PENALTY = 1; // Mess decrease from a missed asteroid (was 2)
-        const MESS_PLAYER_HIT_DAMAGE = 20; // Mess decrease when player gets hit (was 25)
-        const MESS_POWERUP_HEAL = 35; // Power-up *increases* mess (heals) by 35 units (was 30)
+        const MESS_PASSIVE_DECREASE_RATE = 0.1; // Mess decreases by 0.1 per second
+        const MESS_MISSED_ASTEROID_PENALTY = 1; // Mess decrease from a missed asteroid
+        const MESS_PLAYER_HIT_DAMAGE = 20; // Mess decrease when player gets hit
+        const MESS_POWERUP_HEAL = 35; // Power-up *increases* mess (heals) by 35 units
 
         let gameActive = false;
         let animationFrameId;
+        let soundEnabled = true; // Global sound toggle
 
         // Player properties
         const PLAYER_SIZE = 15;
@@ -299,16 +304,17 @@
         let lastShotTime = 0;
 
         // Asteroid properties
-        const ASTEROID_MAX_SPEED = 1.0; // Reduced max speed for asteroids (was 2.0)
+        const ASTEROID_MAX_SPEED = 0.7; // Reduced max speed for asteroids (was 1.0)
         const ASTEROID_MIN_SIZE = 15;
         const ASTEROID_MAX_SIZE = 40;
         const ASTEROID_COLORS = ['#9370DB', '#00BFFF', '#FF69B4']; // Cosmic purple, blue, pink
         const ASTEROID_BREAK_FACTOR = 0.6; // How much smaller new asteroids are
+        const ASTEROID_BASE_POINTS = 10; // Base points for destroying an asteroid
 
         // Power-up properties (Charge Orb)
         const POWER_UP_SIZE = 12;
         const POWER_UP_COLOR = '#22DD22'; // Green for Charge Orb
-        const POWER_UP_DROP_CHANCE = 0.5; // 50% chance for a power-up to drop (was 0.4)
+        const POWER_UP_DROP_CHANCE = 0.5; // 50% chance for a power-up to drop
 
         // Input state
         let keys = {
@@ -320,9 +326,88 @@
         let touchThrustActive = false;
         let touchRotateLeftActive = false;
         let touchRotateRightActive = false;
-        let touchShootActive = false;
+        // touchShootActive is now controlled by ANY touch on canvas (if not a movement control)
+        let touchShootActive = false; 
 
-        // --- Removed all Tone.js audio setup and related functions/variables ---
+        // --- Sound Effects with Tone.js ---
+        let thrustSynth;
+        let shootSynth;
+        let asteroidExplosionSynth;
+        let juiceBoltSynth;
+        let playerHitSynth;
+        let powerUpPickupSynth;
+        let gameOverNoise;
+
+        function setupAudio() {
+            // Ensure Tone.js starts on first user interaction
+            document.documentElement.addEventListener('mousedown', Tone.start);
+            document.documentElement.addEventListener('touchstart', Tone.start);
+
+            // Thrust Sound (Simple square wave)
+            thrustSynth = new Tone.Synth({
+                oscillator: { type: "square" },
+                envelope: { attack: 0.01, decay: 0.1, sustain: 0.1, release: 0.1 },
+                volume: -15
+            }).toDestination();
+
+            // Shoot Sound (Fast decay, high frequency)
+            shootSynth = new Tone.Synth({
+                oscillator: { type: "triangle" },
+                envelope: { attack: 0.005, decay: 0.05, sustain: 0, release: 0.05 },
+                volume: -10
+            }).toDestination();
+
+            // Asteroid Explosion (Noise burst)
+            asteroidExplosionSynth = new Tone.NoiseSynth({
+                noise: { type: "brown" },
+                envelope: { attack: 0.005, decay: 0.2, sustain: 0, release: 0.1 },
+                volume: -10
+            }).toDestination();
+
+            // Juice Bolt (More complex, sweeping sound)
+            juiceBoltSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "sine" },
+                envelope: { attack: 0.01, decay: 0.8, sustain: 0.1, release: 0.5 },
+                volume: -5
+            }).toDestination();
+
+            // Player Hit (Short, low frequency click)
+            playerHitSynth = new Tone.MembraneSynth({
+                pitchDecay: 0.05,
+                octaves: 8,
+                oscillator: { type: "sawtooth" },
+                envelope: { attack: 0.001, decay: 0.4, sustain: 0.01, release: 1 },
+                volume: -10
+            }).toDestination();
+
+            // Power-up pickup (Upward arpeggio)
+            powerUpPickupSynth = new Tone.Synth({
+                oscillator: { type: "triangle" },
+                envelope: { attack: 0.005, decay: 0.1, sustain: 0.1, release: 0.2 },
+                volume: -10
+            }).toDestination();
+
+            // Game Over (Slightly descending noise)
+            gameOverNoise = new Tone.NoiseSynth({
+                noise: { type: "pink" },
+                envelope: { attack: 0.005, decay: 0.5, sustain: 0, release: 0.5 },
+                volume: -5
+            }).toDestination();
+        }
+
+        // Function to toggle sound
+        function toggleSound() {
+            soundEnabled = !soundEnabled;
+            soundToggleButton.textContent = `Sound: ${soundEnabled ? 'On' : 'Off'}`;
+            // Mute or Unmute Tone.js Master output
+            Tone.Destination.mute = !soundEnabled;
+
+            // Specifically handle thrust synth release if it's currently playing and muting
+            if (!soundEnabled && thrustSynth && thrustSynth.isStarted) {
+                thrustSynth.triggerRelease();
+            }
+        }
+
 
         // --- Game Objects (Classes) ---
 
@@ -398,6 +483,12 @@
 
                 // Thrust
                 this.thrusting = (keys.ArrowUp || touchThrustActive);
+                // Play/stop thrust sound
+                if (soundEnabled && this.thrusting && thrustSynth && Tone.context.state === 'running') {
+                    thrustSynth.triggerAttack("C3");
+                } else if (thrustSynth && thrustSynth.isStarted) {
+                    thrustSynth.triggerRelease();
+                }
 
                 if (this.thrusting) {
                     this.velocity.x += Math.cos(this.angle) * PLAYER_THRUST_POWER;
@@ -434,6 +525,7 @@
                 this.angle = -Math.PI / 2;
                 this.blinking = true;
                 this.blinkTimer = this.invincibleDuration;
+                if (soundEnabled && playerHitSynth && Tone.context.state === 'running') playerHitSynth.triggerAttackRelease("C2", "8n");
             }
         }
 
@@ -448,6 +540,7 @@
                 this.offsets = [];
                 this.angle = Math.random() * Math.PI * 2; // Initial random rotation
                 this.rotationSpeed = (Math.random() - 0.5) * 0.02; // Slow rotation
+                this.pointValue = ASTEROID_BASE_POINTS; // Default points
 
                 // Generate irregular shape
                 for (let i = 0; i < this.numSegments; i++) {
@@ -472,6 +565,16 @@
                 ctx.closePath();
                 ctx.stroke();
                 ctx.shadowBlur = 0; // Reset shadow
+
+                // Draw point value on the asteroid
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.font = `${Math.floor(this.radius * 0.8)}px Inter, sans-serif`; // Font size scales with asteroid size
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.pointValue, 0, 0);
+                ctx.restore();
             }
 
             update() {
@@ -643,6 +746,8 @@
             resizeCanvas();
             window.addEventListener('resize', resizeCanvas);
 
+            setupAudio(); // Initialize audio context
+
             player = new Player(canvas.width / 2, canvas.height / 2);
             player.respawn(); // Initial invincibility
 
@@ -677,6 +782,10 @@
         let lastFrameTime = performance.now();
         function gameLoop(currentTime = performance.now()) {
             if (!gameActive) {
+                 // Stop any lingering thrust sound if game ends
+                if (thrustSynth && thrustSynth.isStarted) {
+                    thrustSynth.triggerRelease();
+                }
                 return;
             }
 
@@ -798,6 +907,7 @@
             const velocityY = Math.sin(player.angle) * PROJECTILE_SPEED;
 
             projectiles.push(new Projectile(muzzleX, muzzleY, velocityX, velocityY));
+            if (soundEnabled && shootSynth && Tone.context.state === 'running') shootSynth.triggerAttackRelease("C5", "32n");
         }
 
         function checkCollisions() {
@@ -812,7 +922,10 @@
                     if (distance < projectile.radius + asteroid.radius) {
                         // Collision! Remove projectile
                         projectiles.splice(i, 1);
-                        score += 10; // Basic score for hit
+                        score += asteroid.pointValue; // Add asteroid's point value to score
+                        if (soundEnabled && asteroidExplosionSynth && Tone.context.state === 'running') {
+                            asteroidExplosionSynth.triggerAttackRelease(asteroid.radius > ASTEROID_MIN_SIZE ? "16n" : "32n"); // Shorter sound for smaller asteroids
+                        }
 
                         // Break asteroid into smaller pieces if large enough
                         if (asteroid.radius > ASTEROID_MIN_SIZE) {
@@ -820,11 +933,14 @@
                             const numNewAsteroids = (asteroid.radius === ASTEROID_MAX_SIZE) ? 3 : 2; // Large breaks into 3, medium into 2
 
                             for (let k = 0; k < numNewAsteroids; k++) {
-                                const speed = Math.random() * ASTEROID_MAX_SPEED * 1.5 + 0.5; // Faster new pieces
+                                const speedMultiplier = (asteroid.radius === ASTEROID_MAX_SIZE) ? 1.5 : 2.0; // Smaller pieces get faster
+                                const speed = Math.random() * ASTEROID_MAX_SPEED * speedMultiplier + 0.5;
                                 const angle = Math.random() * Math.PI * 2;
                                 const velocityX = Math.cos(angle) * speed;
                                 const velocityY = Math.sin(angle) * speed;
-                                asteroids.push(new Asteroid(asteroid.x, asteroid.y, newRadius, velocityX, velocityY));
+                                const newAsteroid = new Asteroid(asteroid.x, asteroid.y, newRadius, velocityX, velocityY);
+                                newAsteroid.pointValue = Math.floor(ASTEROID_BASE_POINTS * (newRadius / ASTEROID_MAX_SIZE)); // Scale points for broken pieces
+                                asteroids.push(newAsteroid);
                             }
                         } else {
                             // Only spawn power-up if smallest asteroid is destroyed
@@ -867,6 +983,7 @@
                     increaseMessMeter(MESS_POWERUP_HEAL); // Power-up now heals!
                     updateUI(); // Update UI to show charge count and healed mess
                     powerUps.splice(i, 1); // Remove collected power-up
+                    if (soundEnabled && powerUpPickupSynth && Tone.context.state === 'running') powerUpPickupSynth.triggerAttackRelease("C5", "32n");
                 }
             }
         }
@@ -912,9 +1029,13 @@
                 updateUI();
                 explosions.push(new JuiceBoltExplosion()); // Add the animation
                 
+                // Play Juice Bolt sound
+                if (soundEnabled && juiceBoltSynth && Tone.context.state === 'running') juiceBoltSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "2n");
+
                 // Destroy all asteroids
                 asteroids.forEach(asteroid => {
-                    score += 10; // Bonus score for clearing
+                    score += asteroid.pointValue; // Bonus score for clearing
+                    if (soundEnabled && asteroidExplosionSynth && Tone.context.state === 'running') asteroidExplosionSynth.triggerAttackRelease("32n"); // Play a rapid succession of small explosion sounds
                 });
                 asteroids = []; // Clear all asteroids
             }
@@ -925,6 +1046,11 @@
             cancelAnimationFrame(animationFrameId);
             finalScoreElem.textContent = `Final Score: ${score}`;
             gameOverOverlay.classList.remove('hidden');
+            if (soundEnabled && gameOverNoise && Tone.context.state === 'running') gameOverNoise.triggerAttackRelease("4n");
+            // Stop any lingering thrust sound
+            if (thrustSynth && thrustSynth.isStarted) {
+                thrustSynth.triggerRelease();
+            }
         }
 
         restartButton.addEventListener('click', () => {
@@ -932,6 +1058,7 @@
         });
 
         juiceBoltButton.addEventListener('click', activateJuiceBolt);
+        soundToggleButton.addEventListener('click', toggleSound);
 
 
         // --- Input Event Listeners ---
@@ -965,7 +1092,9 @@
             }
         }, false);
 
-        // Mobile touch controls (simplified, assuming areas of the screen for controls)
+        // Mobile touch controls
+        // Only trigger shoot if a touch is NOT primarily for movement.
+        // The movement zones are at the bottom of the screen.
         canvas.addEventListener('touchstart', (e) => {
             if (!gameActive) return;
             e.preventDefault(); // Prevent scrolling/zooming
@@ -980,15 +1109,26 @@
             touchThrustActive = false;
             touchShootActive = false;
 
-            // Define touch zones
-            if (touchY < canvasRect.height * 0.4) { // Top 40% to shoot
+            // Check if touch is within one of the movement zones (bottom 60% of screen)
+            // If it's *not* in a movement zone, assume it's a shoot command.
+            const movementZoneThreshold = canvasRect.height * 0.4; // Top 40% is implicitly shoot
+            
+            if (touchY < movementZoneThreshold) { // If touch is in the top 40% of the canvas
                 touchShootActive = true;
-            } else if (touchX < canvasRect.width * 0.3) { // Bottom-left 30% for rotate left
-                touchRotateLeftActive = true;
-            } else if (touchX > canvasRect.width * 0.7) { // Bottom-right 30% for rotate right
-                touchRotateRightActive = true;
-            } else { // Middle 40% of bottom for thrust
-                touchThrustActive = true;
+            } else { // If touch is in the bottom 60% of the canvas
+                const touchXRelative = touchX - canvasRect.left;
+                const canvasWidth = canvasRect.width;
+
+                if (touchXRelative < canvasWidth * 0.3) { // Left 30% for rotate left
+                    touchRotateLeftActive = true;
+                } else if (touchXRelative > canvasWidth * 0.7) { // Right 30% for rotate right
+                    touchRotateRightActive = true;
+                } else { // Middle 40% of bottom for thrust
+                    touchThrustActive = true;
+                }
+                // If a movement control is active, then touchShootActive is false.
+                // This ensures movement input has priority in its zones.
+                touchShootActive = false;
             }
         }, { passive: false });
 
@@ -998,6 +1138,10 @@
             touchRotateLeftActive = false;
             touchRotateRightActive = false;
             touchThrustActive = false;
+            // Stop thrust sound on release
+            if (thrustSynth && thrustSynth.isStarted) {
+                thrustSynth.triggerRelease();
+            }
         });
 
 
